@@ -116,6 +116,78 @@ class SatelliteZoom(Scene):
         return im
 
 
+class SatellitePyramidZoom(Scene):
+    """Smooth fly-in using several satellite captures of the same centre,
+    each one zoom level (2x) closer. Finer levels are painted over coarser
+    ones with feathered masks, so detail sharpens as we descend."""
+
+    CENTER = (1400, 842)  # fixed map centre in every capture (measured)
+
+    def __init__(self, folder, levels=range(14, 20), target_off=(-15, -12),
+                 z0=14.0, z1=19.35, dur=9.0, title="Supreme Judicial Council",
+                 sub="Hayy al Irfan, Muscat - satellite view"):
+        self.levels = list(levels)
+        self.imgs = {L: Image.open(os.path.join(folder, f"bing_z{L}.jpg")).convert("RGB")
+                     for L in self.levels}
+        iw, ih = self.imgs[self.levels[0]].size
+        m = Image.new("L", (iw, ih), 0)
+        d = ImageDraw.Draw(m)
+        d.rectangle((40, 110, iw - 40, ih - 40), fill=255)   # keep away from edges/header
+        d.rectangle((2380, 0, iw, 440), fill=0)              # map controls / breadcrumb
+        d.rectangle((2580, 1480, iw, ih), fill=0)            # feedback / attribution
+        self.mask = m.filter(ImageFilter.GaussianBlur(18))
+        self.off = target_off  # building offset from centre, in finest-level px
+        self.z0, self.z1, self.dur = z0, z1, dur
+        self.title, self.sub = title, sub
+
+    def zoom(self, t):
+        return lerp(self.z0, self.z1, ease(t / (self.dur - 0.6)))
+
+    def frame(self, t):
+        z = self.zoom(t)
+        Lmax = self.levels[-1]
+        out = Image.new("RGB", (W, H), (20, 20, 20))
+        for L in self.levels:
+            s = 2 ** (L - z)          # level-L px per output px
+            if s < 0.45 and L != self.levels[0]:
+                continue              # too coarse to be useful once finer exist
+            if s > 6:
+                break                 # finer levels would cover a tiny area
+            k = 2 ** (L - Lmax)
+            cx = self.CENTER[0] + self.off[0] * k
+            cy = self.CENTER[1] + self.off[1] * k
+            rect = (cx - W / 2 * s, cy - H / 2 * s, cx + W / 2 * s, cy + H / 2 * s)
+            out.paste(view(self.imgs[L], rect, (W, H)), (0, 0), view(self.mask, rect, (W, H)))
+        im = out.convert("RGBA")
+        # marker on the building once it is recognisable
+        ma = ease((z - 17.3) / 0.8)
+        if ma > 0:
+            ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(ov)
+            fx, fy = W / 2, H / 2
+            sc = 2 ** (z - Lmax)       # output px per finest-level px
+            bw, bh = 150 * sc, 160 * sc  # rough building footprint in z19 px
+            pulse = 0.5 + 0.5 * math.sin(t * 5)
+            d.rounded_rectangle((fx - bw - 8 * pulse, fy - bh - 8 * pulse,
+                                 fx + bw + 8 * pulse, fy + bh + 8 * pulse), 14,
+                                outline=GREEN + (int(255 * ma),), width=6)
+            f = font(40)
+            label = "SUPREME JUDICIAL COUNCIL"
+            tw = d.textlength(label, font=f)
+            ly = fy - bh - 100
+            d.rounded_rectangle((fx - tw / 2 - 28, ly, fx + tw / 2 + 28, ly + 68), 34,
+                                fill=GREEN + (int(235 * ma),), outline=WHITE + (int(255 * ma),), width=3)
+            d.text((fx - tw / 2, ly + 12), label, font=f, fill=WHITE + (int(255 * ma),))
+            d.polygon([(fx - 18, ly + 68), (fx + 18, ly + 68), (fx, ly + 98)],
+                      fill=GREEN + (int(235 * ma),))
+            im.alpha_composite(ov)
+        caption(im, self.title, self.sub, ease((t - 0.4) / 0.6))
+        d = ImageDraw.Draw(im)
+        d.text((W - 330, H - 34), "Imagery (c) Microsoft Bing Maps", font=font(18, False),
+               fill=(255, 255, 255, 200))
+        return im
+
+
 class HallPan(Scene):
     def __init__(self, path, title, sub, drift=+1, dur=4.5):
         self.img = Image.open(path).convert("RGB")
@@ -273,7 +345,8 @@ def render(scenes, out):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--satellite", help="satellite image of the site")
+    ap.add_argument("--satellite", help="single satellite image of the site (alternative)")
+    ap.add_argument("--no-satellite", action="store_true", help="use a title card instead")
     ap.add_argument("--target", default=None, help="building pixel x,y in satellite image")
     ap.add_argument("-o", "--out", default=os.path.join(HERE, "evacuation_clip.mp4"))
     args = ap.parse_args()
@@ -283,7 +356,10 @@ if __name__ == "__main__":
     c2 = CorridorExit(A("corridor2.jpg"), door=(440, 600, 517, 680), path_start=(470, 1180),
                       label="EMERGENCY EXIT 2", sub="End of corridor 2 - follow the arrows")
     scenes = []
-    if args.satellite:
+    sat_dir = A("satellite")
+    if not args.no_satellite and not args.satellite and os.path.isdir(sat_dir):
+        scenes.append(SatellitePyramidZoom(sat_dir))
+    elif args.satellite:
         sat = Image.open(args.satellite)
         tgt = tuple(map(float, args.target.split(","))) if args.target else (sat.width / 2, sat.height / 2)
         scenes.append(SatelliteZoom(args.satellite, tgt))
